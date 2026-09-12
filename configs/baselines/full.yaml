@@ -1,0 +1,30 @@
+baseline_type: full_attnres
+execution_mode: full
+fixed_partition: null
+
+seed: 42
+precision: bf16
+use_cache: false
+base_checkpoint: outputs/base/qwen3_14b_full_attnres
+data_manifest: outputs/data/splits.json
+data_config: configs/data.yaml
+output_root: outputs/baselines/full
+
+training_source_split: stage3_adapter_train
+selection_order: stable_id
+training_cases_per_task: 200
+training_task_order: [math, multihop]
+training_passes: 1
+micro_batch_size: 1
+gradient_accumulation_steps: 1
+maximum_sequence_length: 2048
+
+optimizer: AdamW
+learning_rate: 1.0e-3
+betas: [0.9, 0.999]
+eps: 1.0e-8
+weight_decay: 0.0
+gradient_clip_norm: 1.0
+scheduler: constant
+
+expected_num_transformer_blocks: 40

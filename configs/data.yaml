@@ -1,0 +1,223 @@
+tokenizer:
+  name_or_path: outputs/base/qwen3_14b_full_attnres
+  local_files_only: true
+
+split_seed: 42
+split_key_prefix: "moiraiblock-post-seed42::"
+output_dir: outputs/data
+
+counts:
+  stage2_discovery:
+    math: 1000
+    multihop: 1000
+    code: 500
+  stage3_adapter_train: 1000
+  stage3_adapter_val: 500
+  probe_train: 200
+  probe_val: 500
+  stage4_final_eval: 10
+
+task_count_overrides:
+  code:
+    stage3_adapter_train: 200
+    stage3_adapter_val: 45
+    probe_train: 100
+    probe_val: 45
+
+allowed_cross_stage_reuse: []
+
+sources:
+  gsm8k:
+    dataset_name: gsm8k
+    repo_id: openai/gsm8k
+    subset: main
+    local_path: artifacts/data/gsm8k_train
+    revision: 740312add88f781978c0658806c59bc2815b9866
+    official_split: train
+    field_mapping:
+      id: question
+      question: question
+      target: answer
+
+  clutrr:
+    dataset_name: clutrr
+    repo_id: CLUTRR/v1
+    subset: rob_train_clean_23_test_all_23
+    local_path: artifacts/data/clutrr_v1_task_1_2
+    revision: a8158d1fac10864c3424d53662fe63bf7d82dd87
+    official_split: train
+    expected_rows: 4054
+    task_name: task_1.2
+    split_urls:
+      train: https://raw.githubusercontent.com/kliang5/CLUTRR_huggingface_dataset/main/rob_train_clean_23_test_all_23/train.csv
+      validation: https://raw.githubusercontent.com/kliang5/CLUTRR_huggingface_dataset/main/rob_train_clean_23_test_all_23/validation.csv
+      test: https://raw.githubusercontent.com/kliang5/CLUTRR_huggingface_dataset/main/rob_train_clean_23_test_all_23/test.csv
+    field_mapping:
+      id: id
+      story: story
+      query: query
+      target: target_text
+
+  hotpotqa:
+    dataset_name: hotpotqa
+    repo_id: hotpotqa/hotpot_qa
+    subset: distractor
+    local_path: ../data/pretraining/hotpotqa_train
+    # This local snapshot is identified by its source dataset metadata hash;
+    # no network fetch is permitted by the formal pipeline.
+    revision: local-dataset-info-sha256-3f8162c114ccf70b984c692d9bc205d2f81507faa774fccdc4581ba5a62c4fad
+    official_split: train
+    expected_rows: 90447
+    field_mapping:
+      id: id
+      question: question
+      context: context
+      target: answer
+
+  svamp:
+    dataset_name: svamp
+    repo_id: arkilpatel/SVAMP
+    subset: official
+    source_url: https://raw.githubusercontent.com/arkilpatel/SVAMP/689d7ccac74b9983a2ac7cc3b264f441b99e7c53/SVAMP.json
+    local_path: artifacts/data/svamp
+    revision: 689d7ccac74b9983a2ac7cc3b264f441b99e7c53
+    official_split: all
+    expected_rows: 1000
+    field_mapping:
+      id: id
+      question: question
+      target: answer
+
+  mbpp:
+    dataset_name: mbpp
+    repo_id: google-research-datasets/mbpp
+    subset: full
+    local_path: outputs/data/mbpp_full_preprocessed
+    revision: 4bb6404fdc6cacfda99d4ac4205087b89d32030c
+    official_split: train
+    expected_rows: 374
+    field_mapping:
+      id: stable_id
+      prompt: prompt
+      target: target
+      test_list: test_list
+      test_setup_code: test_setup_code
+      challenge_test_list: challenge_test_list
+
+discovery_sources:
+  math:
+    gsm8k: 500
+    svamp: 500
+  multihop:
+    clutrr: 1000
+  code:
+    mbpp: 500
+
+training_sources:
+  # Stage-3 examples are drawn from this task-local mixture and remain
+  # disjoint from Discovery through the global assignment audit.
+  math:
+    - gsm8k
+    - svamp
+  multihop:
+    - clutrr
+    - hotpotqa
+  code:
+    - mbpp
+
+validation_sources:
+  multihop:
+    dataset_name: clutrr
+    repo_id: CLUTRR/v1
+    subset: rob_train_clean_23_test_all_23
+    local_path: artifacts/data/clutrr_v1_task_1_2
+    revision: a8158d1fac10864c3424d53662fe63bf7d82dd87
+    official_split: validation
+    expected_rows: 1014
+    task_name: task_1.2
+    split_urls:
+      train: https://raw.githubusercontent.com/kliang5/CLUTRR_huggingface_dataset/main/rob_train_clean_23_test_all_23/train.csv
+      validation: https://raw.githubusercontent.com/kliang5/CLUTRR_huggingface_dataset/main/rob_train_clean_23_test_all_23/validation.csv
+      test: https://raw.githubusercontent.com/kliang5/CLUTRR_huggingface_dataset/main/rob_train_clean_23_test_all_23/test.csv
+    field_mapping:
+      id: id
+      story: story
+      query: query
+      target: target_text
+
+  code:
+    dataset_name: mbpp
+    repo_id: google-research-datasets/mbpp
+    subset: full
+    local_path: outputs/data/mbpp_full_preprocessed
+    revision: 4bb6404fdc6cacfda99d4ac4205087b89d32030c
+    official_split: validation
+    expected_rows: 90
+    field_mapping:
+      id: stable_id
+      prompt: prompt
+      target: target
+      test_list: test_list
+      test_setup_code: test_setup_code
+      challenge_test_list: challenge_test_list
+
+probe_sources:
+  gsm8k_main_train:
+    dataset_name: gsm8k
+    repo_id: openai/gsm8k
+    subset: main
+    local_path: artifacts/data/gsm8k_train
+    revision: 740312add88f781978c0658806c59bc2815b9866
+    official_split: train
+    field_mapping:
+      id: question
+      question: question
+      target: answer
+
+evaluation_sources:
+  math:
+    dataset_name: gsm8k
+    repo_id: openai/gsm8k
+    subset: main
+    local_path: artifacts/data/gsm8k_test
+    revision: 740312add88f781978c0658806c59bc2815b9866
+    official_split: test
+    field_mapping:
+      id: question
+      question: question
+      target: answer
+
+  multihop:
+    dataset_name: clutrr
+    repo_id: CLUTRR/v1
+    subset: rob_train_clean_23_test_all_23
+    local_path: artifacts/data/clutrr_v1_task_1_2
+    revision: a8158d1fac10864c3424d53662fe63bf7d82dd87
+    official_split: test
+    expected_rows: 38
+    task_name: task_1.2
+    split_urls:
+      train: https://raw.githubusercontent.com/kliang5/CLUTRR_huggingface_dataset/main/rob_train_clean_23_test_all_23/train.csv
+      validation: https://raw.githubusercontent.com/kliang5/CLUTRR_huggingface_dataset/main/rob_train_clean_23_test_all_23/validation.csv
+      test: https://raw.githubusercontent.com/kliang5/CLUTRR_huggingface_dataset/main/rob_train_clean_23_test_all_23/test.csv
+    field_mapping:
+      id: id
+      story: story
+      query: query
+      target: target_text
+
+  code:
+    dataset_name: mbpp
+    repo_id: google-research-datasets/mbpp
+    subset: full
+    local_path: outputs/data/mbpp_full_preprocessed
+    revision: 4bb6404fdc6cacfda99d4ac4205087b89d32030c
+    official_split: test
+    expected_rows: 500
+    field_mapping:
+      id: stable_id
+      prompt: prompt
+      target: target
+      test_list: test_list
+      test_setup_code: test_setup_code
+      challenge_test_list: challenge_test_list
