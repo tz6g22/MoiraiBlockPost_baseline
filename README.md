@@ -14,6 +14,8 @@ included in this repository.
 ## Repository layout
 
 - `src/baselines/`: baseline model, training, and SVAMP evaluation entrypoints;
+- `kimiattnres/`: current Native Kimi Block/Full implementation for Qwen3-1.7B,
+  including the shared Math -> Multi-hop sequential trainer and FSDP launcher;
 - `configs/baselines/`: full and fixed baseline configurations;
 - `configs/data.yaml`: dataset source and manifest schema, with local paths that
   must be supplied by the execution environment;
@@ -46,3 +48,8 @@ pytest tests/test_baseline_protocol.py \
 
 Training and evaluation write only to the configured `outputs/` paths, which
 are ignored by Git.
+
+The Native Kimi implementation is validated separately from the older
+`src/baselines/` compatibility entrypoints. Its local checkpoint and prepared
+manifest are intentionally external; use the configuration files under
+`kimiattnres/configs/` with paths supplied by the execution environment.
