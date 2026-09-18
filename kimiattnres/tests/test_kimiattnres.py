@@ -8,6 +8,7 @@ from kimiattnres.modeling_qwen3_kimiattnres import (
     Qwen3KimiAttnResForCausalLM,
     convert_pretrained_qwen3,
 )
+from kimiattnres.data import _validation_source_map
 
 
 def _config(
@@ -122,3 +123,19 @@ def test_native_query_and_rmsnorm_receive_updates() -> None:
         optimizer.step()
     assert not torch.equal(before_query, model.model.layers[1].attn_pseudo_query)
     assert not torch.equal(before_key_norm, model.model.layers[1].attn_key_norm.weight)
+
+
+def test_validation_source_overrides_training_split() -> None:
+    config = {
+        "sources": {
+            "clutrr": {"dataset_name": "clutrr", "official_split": "train"},
+        },
+        "validation_sources": {
+            "multihop": {
+                "dataset_name": "clutrr",
+                "official_split": "validation",
+            },
+        },
+    }
+    resolved = _validation_source_map(config, ("clutrr",))
+    assert resolved["clutrr"]["official_split"] == "validation"

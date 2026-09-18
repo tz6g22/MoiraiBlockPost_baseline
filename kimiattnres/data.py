@@ -298,6 +298,24 @@ def load_training_examples(
     return result
 
 
+def _validation_source_map(
+    config: Mapping[str, Any],
+    source_keys: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    training_sources = {
+        str(config["sources"][key]["dataset_name"]): config["sources"][key]
+        for key in source_keys
+    }
+    sources = dict(training_sources)
+    for validation_source in config.get("validation_sources", {}).values():
+        if not isinstance(validation_source, Mapping):
+            continue
+        dataset_name = str(validation_source.get("dataset_name", ""))
+        if dataset_name in training_sources:
+            sources[dataset_name] = validation_source
+    return sources
+
+
 def load_validation_examples(
     *,
     repo_root: str | Path,
@@ -318,10 +336,7 @@ def load_validation_examples(
     result: dict[str, tuple[Example, ...]] = {}
     for task in tasks:
         source_keys = tuple(str(value) for value in source_mix[task])
-        sources = {
-            str(config["sources"][key]["dataset_name"]): config["sources"][key]
-            for key in source_keys
-        }
+        sources = _validation_source_map(config, source_keys)
         selected = sorted(
             (
                 record for record in records
