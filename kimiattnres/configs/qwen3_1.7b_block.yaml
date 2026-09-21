@@ -2,6 +2,7 @@ seed: 42
 mode: block
 base_checkpoint: artifacts/models/Qwen3-1.7B
 data_manifest: outputs/formal_retrain/shared/data/splits.json
+canonical_math_validation_manifest: outputs/formal_retrain/shared/math_validation_manifest.json
 data_config: configs/data_qwen3_1.7b.yaml
 output_dir: outputs/formal_retrain/kimi_block
 block_sizes: [4, 4, 4, 4, 4, 4, 4]
@@ -11,6 +12,8 @@ use_cache: false
 gradient_checkpointing: true
 training:
   task_order: [math, multihop]
+  independent_runs: true
+  loaded_from_math_checkpoint: false
   source_mix:
     math: {gsm8k: 1.0}
     multihop: {clutrr: 1.0}

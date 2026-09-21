@@ -9,6 +9,7 @@ from kimiattnres.modeling_qwen3_kimiattnres import (
     convert_pretrained_qwen3,
 )
 from kimiattnres.data import _validation_source_map
+from kimiattnres.train_sequential import _validate_config
 
 
 def _config(
@@ -139,3 +140,35 @@ def test_validation_source_overrides_training_split() -> None:
     }
     resolved = _validation_source_map(config, ("clutrr",))
     assert resolved["clutrr"]["official_split"] == "validation"
+
+
+def test_independent_configs_keep_both_tasks_declared() -> None:
+    for mode in ("block", "full"):
+        config = {
+            "mode": mode,
+            "use_cache": False,
+            "dtype": "bfloat16",
+            "block_sizes": [4] * 7 if mode == "block" else None,
+            "distributed": {"strategy": "fsdp"},
+            "seed": 42,
+            "training": {
+                "task_order": ["math", "multihop"],
+                "source_mix": {
+                    "math": {"gsm8k": 1.0},
+                    "multihop": {"clutrr": 1.0},
+                },
+                "sampler": {
+                    "mode": "fixed_ratio_round_robin",
+                    "seed": 42,
+                    "pool_size_per_source": 1024,
+                },
+                "micro_batch_size": 1,
+                "gradient_accumulation_steps": 1,
+                "metrics": {
+                    "validation_interval_steps": 100,
+                    "validation_examples_per_task": 32,
+                },
+                "optimizer": {},
+            },
+        }
+        assert _validate_config(config) == ("math", "multihop")

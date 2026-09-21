@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Two-GPU Qwen3-1.7B Kimi formal training launcher.
-# Usage: sbatch --job-name=kimi-block-math formal_2gpu.sbatch block math
+# One fresh two-GPU Native Kimi task run. Math and Multi-hop are submitted as
+# separate jobs and never share a Python process, model, or optimizer state.
+# Usage: sbatch --job-name=kimi-block-math formal_independent_2gpu.sbatch block math [output_dir]
 
 #SBATCH --partition=a100
 #SBATCH --nodes=1
@@ -25,19 +26,13 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 MODE="${1:?expected block or full}"
 TASK="${2:?expected math or multihop}"
 case "$MODE:$TASK" in
-  block:math|block:multihop)
-    CONFIG="${KIMI_CONFIG:-kimiattnres/configs/qwen3_1.7b_block.yaml}"
-    OUT="outputs/formal_retrain/kimi_block_independent/${TASK}"
-    ;;
-  full:math|full:multihop)
-    CONFIG="${KIMI_CONFIG:-kimiattnres/configs/qwen3_1.7b_full.yaml}"
-    OUT="outputs/formal_retrain/kimi_full_independent/${TASK}"
-    ;;
-  *)
-    echo "expected mode block/full and task math/multihop" >&2
-    exit 2
-    ;;
+  block:math) CONFIG="kimiattnres/configs/qwen3_1.7b_block.yaml"; DEFAULT_OUT="outputs/formal_retrain/kimi_block_independent/math" ;;
+  block:multihop) CONFIG="kimiattnres/configs/qwen3_1.7b_block.yaml"; DEFAULT_OUT="outputs/formal_retrain/kimi_block_independent/multihop" ;;
+  full:math) CONFIG="kimiattnres/configs/qwen3_1.7b_full.yaml"; DEFAULT_OUT="outputs/formal_retrain/kimi_full_independent/math" ;;
+  full:multihop) CONFIG="kimiattnres/configs/qwen3_1.7b_full.yaml"; DEFAULT_OUT="outputs/formal_retrain/kimi_full_independent/multihop" ;;
+  *) echo "expected mode block/full and task math/multihop" >&2; exit 2 ;;
 esac
+OUT="${3:-$DEFAULT_OUT}"
 
 exec "$ROOT/.venv/bin/python" -u -m torch.distributed.run \
   --standalone \

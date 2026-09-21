@@ -9,6 +9,11 @@ import torch
 import yaml
 from datasets import DatasetDict, load_from_disk
 
+from src.evaluation.math_validation import (
+    default_math_validation_manifest,
+    load_canonical_math_validation_examples,
+)
+
 
 @dataclass(frozen=True)
 class Example:
@@ -326,6 +331,7 @@ def load_validation_examples(
     max_length: int,
     source_mix: Mapping[str, Mapping[str, float]],
     examples_per_task: int,
+    canonical_manifest: str | Path | None = None,
 ) -> dict[str, tuple[Example, ...]]:
     """Load the same fixed validation split used by the formal protocol."""
     if examples_per_task <= 0:
@@ -335,6 +341,17 @@ def load_validation_examples(
     records = load_manifest(_path(root, str(data_manifest)))
     result: dict[str, tuple[Example, ...]] = {}
     for task in tasks:
+        if task == "math":
+            manifest = canonical_manifest or default_math_validation_manifest(root)
+            result[task] = load_canonical_math_validation_examples(
+                manifest_path=manifest,
+                data_manifest_path=_path(root, str(data_manifest)),
+                data_config_path=_path(root, str(data_config)),
+                tokenizer=tokenizer,
+                max_length=max_length,
+                repo_root=root,
+            )
+            continue
         source_keys = tuple(str(value) for value in source_mix[task])
         sources = _validation_source_map(config, source_keys)
         selected = sorted(

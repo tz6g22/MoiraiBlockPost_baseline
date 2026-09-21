@@ -15,6 +15,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+import yaml
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
@@ -22,6 +23,7 @@ from transformers import AutoTokenizer
 
 from .checkpoint import load_checkpoint, save_checkpoint
 from .data import Example, collate, load_training_examples, load_validation_examples
+from src.evaluation.math_validation import evaluate_causal_lm
 from .modeling_qwen3_kimiattnres import (
     Qwen3KimiDecoderLayer,
     convert_pretrained_qwen3,
@@ -355,39 +357,15 @@ def _validation_loss(
     device: torch.device,
     context: dict[str, Any] | None,
 ) -> float:
-    model.eval()
-    rank = context["rank"] if context is not None else 0
-    world_size = context["world_size"] if context is not None else 1
-    loss_sum = torch.zeros((), dtype=torch.float32, device=device)
-    token_count = torch.zeros((), dtype=torch.float32, device=device)
-    for index, example in enumerate(examples):
-        if index % world_size != rank:
-            continue
-        batch = collate([example], tokenizer.pad_token_id)
-        labels = batch.pop("labels").to(device)
-        inputs = {key: value.to(device) for key, value in batch.items()}
-        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
-            logits = model(**inputs, use_cache=False).logits
-        valid = labels != -100
-        if not valid.any():
-            continue
-        loss_sum += F.cross_entropy(
-            logits.float().reshape(-1, logits.shape[-1]),
-            labels.reshape(-1),
-            ignore_index=-100,
-            reduction="sum",
-        )
-        token_count += valid.sum()
-    if context is not None:
-        dist.all_reduce(loss_sum, op=dist.ReduceOp.SUM)
-        dist.all_reduce(token_count, op=dist.ReduceOp.SUM)
-    if token_count.item() <= 0:
-        raise RuntimeError("KIMI_VALIDATION_HAS_NO_SUPERVISED_TOKENS")
-    value = loss_sum / token_count
-    if not torch.isfinite(value):
-        raise FloatingPointError("KIMI_VALIDATION_LOSS_NAN_OR_INF")
-    model.train()
-    return float(value.cpu())
+    return float(
+        evaluate_causal_lm(
+            model,
+            examples,
+            pad_token_id=int(tokenizer.pad_token_id),
+            device=device,
+            distributed_context=context,
+        )["loss"]
+    )
 
 
 def _summarize_metrics(path: Path, task: str) -> dict[str, Any]:
@@ -456,10 +434,15 @@ def _sampling_summary(
     return summary
 
 
+def _stable_id_sha256(examples: tuple[Example, ...]) -> str:
+    value = "\n".join(sorted(example.stable_id for example in examples))
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def _validate_config(config: dict[str, Any]) -> tuple[str, ...]:
     tasks = tuple(config["training"]["task_order"])
     if tasks != ("math", "multihop"):
-        raise ValueError("Kimi baseline currently requires task_order=[math, multihop]")
+        raise ValueError("Kimi baseline config requires task_order=[math, multihop]")
     if config["use_cache"] is not False or config["dtype"] != "bfloat16":
         raise ValueError("Kimi baseline requires BF16 and use_cache=false")
     if "alpha_lr" in config["training"]["optimizer"]:
@@ -508,6 +491,51 @@ def _validate_config(config: dict[str, Any]) -> tuple[str, ...]:
     return tasks
 
 
+def _assert_independent_start(
+    config: dict[str, Any],
+    *,
+    task: str,
+    configured_tasks: tuple[str, ...],
+    checkpoint: Path,
+    resume: str | None,
+    conversion: dict[str, list[str]],
+    model,
+    optimizer: torch.optim.Optimizer,
+    scheduler: TokenCosineScheduler,
+) -> None:
+    """Reject any state that could turn a single-task run into a continuation."""
+    if task not in configured_tasks:
+        raise RuntimeError(f"KIMI_INDEPENDENT_TASK_INVALID: {task}")
+    if resume is not None:
+        raise RuntimeError("KIMI_INDEPENDENT_RUN_FORBIDS_RESUME")
+    if len(configured_tasks) != 2:
+        raise RuntimeError("KIMI_INDEPENDENT_CONFIG_TASK_SET_MISMATCH")
+    if config.get("training", {}).get("loaded_from_math_checkpoint", False):
+        raise RuntimeError("KIMI_INDEPENDENT_RUN_LOADED_FROM_MATH_CHECKPOINT")
+    budgets = config.get("training", {}).get("token_budget", {})
+    if int(budgets.get("math", -1)) != 500000 or int(budgets.get("multihop", -1)) != 500000:
+        raise RuntimeError("KIMI_INDEPENDENT_TOKEN_BUDGET_MISMATCH")
+    expected_checkpoint = _resolve(_root(), config["base_checkpoint"]).resolve()
+    if checkpoint.resolve() != expected_checkpoint:
+        raise RuntimeError("KIMI_INDEPENDENT_BACKBONE_SOURCE_MISMATCH")
+    if conversion.get("unexpected_keys") or any(
+        not ("pseudo_query" in name or "key_norm" in name)
+        for name in conversion.get("missing_keys", ())
+    ):
+        raise RuntimeError("KIMI_INDEPENDENT_CONVERSION_SOURCE_MISMATCH")
+    if scheduler.trained_tokens != 0:
+        raise RuntimeError("KIMI_INDEPENDENT_SCHEDULER_NOT_FRESH")
+    if optimizer.state:
+        raise RuntimeError("KIMI_INDEPENDENT_OPTIMIZER_STATE_NOT_FRESH")
+    for name, parameter in model.named_parameters():
+        if "pseudo_query" in name and torch.count_nonzero(parameter.detach()).item() != 0:
+            raise RuntimeError(f"KIMI_INDEPENDENT_QUERY_NOT_ZERO: {name}")
+        if "key_norm" in name:
+            expected = torch.ones_like(parameter.detach())
+            if not torch.equal(parameter.detach(), expected):
+                raise RuntimeError(f"KIMI_INDEPENDENT_RMSNORM_NOT_FRESH: {name}")
+
+
 def run(
     config: dict[str, Any],
     *,
@@ -516,9 +544,16 @@ def run(
     output_override: str | None = None,
     steps_per_task: int | None = None,
     stop_after_task: str | None = None,
+    independent_task: str | None = None,
 ) -> dict[str, Any]:
     root = _root()
-    tasks = _validate_config(config)
+    configured_tasks = _validate_config(config)
+    if config["training"].get("independent_runs") is True and independent_task is None:
+        raise RuntimeError("KIMI_INDEPENDENT_TASK_REQUIRED")
+    if independent_task is not None:
+        tasks = (str(independent_task),)
+    else:
+        tasks = configured_tasks
     _seed(int(config["seed"]))
     distributed_context = _init_distributed()
     device = (
@@ -558,6 +593,7 @@ def run(
         max_length=int(config["max_sequence_length"]),
         source_mix=config["training"]["source_mix"],
         examples_per_task=int(config["training"]["metrics"]["validation_examples_per_task"]),
+        canonical_manifest=config.get("canonical_math_validation_manifest"),
     )
     sampling_summary = _sampling_summary(
         examples_by_task,
@@ -614,14 +650,68 @@ def run(
         warmup_ratio=float(scheduler_config["warmup_ratio"]),
         min_lr_ratio=float(scheduler_config["min_lr_ratio"]),
     )
+    if independent_task is not None:
+        _assert_independent_start(
+            config,
+            task=str(independent_task),
+            configured_tasks=configured_tasks,
+            checkpoint=checkpoint,
+            resume=resume,
+            conversion=conversion,
+            model=_root_model(model),
+            optimizer=optimizer,
+            scheduler=scheduler,
+        )
     initial_query = _snapshot_group(model, "pseudo_query")
     initial_key_norm = _snapshot_group(model, "key_norm")
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     output = _resolve(root, output_override or config["output_dir"])
-    if output.exists() and any(output.iterdir()) and resume is None:
-        raise FileExistsError(f"Refusing to overwrite Kimi output: {output}")
-    output.mkdir(parents=True, exist_ok=True)
+    output_error = None
+    if _is_rank0(distributed_context):
+        if output.exists() and any(output.iterdir()) and resume is None:
+            output_error = f"Refusing to overwrite Kimi output: {output}"
+        else:
+            output.mkdir(parents=True, exist_ok=True)
+    if distributed_context is not None:
+        payload = [output_error]
+        dist.broadcast_object_list(payload, src=0)
+        output_error = payload[0]
+    if output_error is not None:
+        raise FileExistsError(output_error)
+    _barrier(distributed_context)
+    if _is_rank0(distributed_context):
+        (output / "config.yaml").write_text(
+            yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
+        )
+        manifest_path = _resolve(root, config["data_manifest"])
+        binding = {
+            "base_checkpoint": str(checkpoint),
+            "data_manifest": str(manifest_path),
+            "data_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+            "task": independent_task,
+            "training_stable_ids": sorted(example.stable_id for example in examples_by_task[tasks[0]]),
+            "validation_stable_ids": sorted(example.stable_id for example in validation_examples_by_task[tasks[0]]),
+        }
+        binding["training_stable_id_sha256"] = _stable_id_sha256(examples_by_task[tasks[0]])
+        binding["validation_stable_id_sha256"] = _stable_id_sha256(validation_examples_by_task[tasks[0]])
+        (output / "data_binding.json").write_text(
+            json.dumps(binding, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        (output / "job_metadata.json").write_text(
+            json.dumps(
+                {
+                    "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
+                    "mode": config["mode"],
+                    "independent_task": independent_task,
+                    "output_dir": str(output),
+                },
+                indent=2,
+                sort_keys=True,
+            ) + "\n",
+            encoding="utf-8",
+        )
+    _barrier(distributed_context)
     metrics_path = output / "metrics.jsonl"
     metric_paths = {task: output / f"metrics_{task}.jsonl" for task in tasks}
     summary_path = output / "metrics_summary.json"
@@ -795,6 +885,8 @@ def run(
             metadata = {
                 "schema": "kimiattnres_native_v1",
                 "mode": config["mode"],
+                "independent_task": independent_task,
+                "loaded_from_math_checkpoint": False if independent_task is not None else None,
                 "block_sizes": config.get("block_sizes"),
                 "task_order": list(tasks),
                 "base_checkpoint": str(checkpoint),
@@ -860,6 +952,8 @@ def run(
     summary = {
         "status": "PASS",
         "mode": config["mode"],
+        "independent_task": independent_task,
+        "loaded_from_math_checkpoint": False if independent_task is not None else None,
         "device": str(device),
         "conversion_check": conversion_check,
         "conversion": conversion,
@@ -892,8 +986,17 @@ def main() -> None:
     parser.add_argument("--output-dir")
     parser.add_argument("--steps-per-task", type=int)
     parser.add_argument("--stop-after-task")
+    parser.add_argument("--independent-task", choices=("math", "multihop"))
     args = parser.parse_args()
-    summary = run(_load_config(args.config), resume=args.resume, max_steps=args.max_steps, output_override=args.output_dir, steps_per_task=args.steps_per_task, stop_after_task=args.stop_after_task)
+    summary = run(
+        _load_config(args.config),
+        resume=args.resume,
+        max_steps=args.max_steps,
+        output_override=args.output_dir,
+        steps_per_task=args.steps_per_task,
+        stop_after_task=args.stop_after_task,
+        independent_task=args.independent_task,
+    )
     if not dist.is_initialized() or dist.get_rank() == 0:
         print(json.dumps(summary, indent=2, sort_keys=True))
     if dist.is_initialized():
